@@ -20,12 +20,22 @@ export default function SettingsRoute() {
 
 	const [displayName, setDisplayName] = useState("");
 	const [agentPrompt, setAgentPrompt] = useState("");
+	const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
+	const [autoReplySubject, setAutoReplySubject] = useState("");
+	const [autoReplyMessage, setAutoReplyMessage] = useState("");
+	const [forwardingEnabled, setForwardingEnabled] = useState(false);
+	const [forwardingEmail, setForwardingEmail] = useState("");
 	const [isSaving, setIsSaving] = useState(false);
 
 	useEffect(() => {
 		if (mailbox) {
 			setDisplayName(mailbox.settings?.fromName || mailbox.name || "");
 			setAgentPrompt(mailbox.settings?.agentSystemPrompt || "");
+			setAutoReplyEnabled(mailbox.settings?.autoReply?.enabled ?? false);
+			setAutoReplySubject(mailbox.settings?.autoReply?.subject ?? "");
+			setAutoReplyMessage(mailbox.settings?.autoReply?.message ?? "");
+			setForwardingEnabled(mailbox.settings?.forwarding?.enabled ?? false);
+			setForwardingEmail(mailbox.settings?.forwarding?.email ?? "");
 		}
 	}, [mailbox]);
 
@@ -36,6 +46,15 @@ export default function SettingsRoute() {
 			...mailbox.settings,
 			fromName: displayName,
 			agentSystemPrompt: agentPrompt.trim() || undefined,
+			autoReply: {
+				enabled: autoReplyEnabled,
+				subject: autoReplySubject,
+				message: autoReplyMessage,
+			},
+			forwarding: {
+				enabled: forwardingEnabled,
+				email: forwardingEmail.trim(),
+			},
 		};
 		try {
 			await updateMailboxMutation.mutateAsync({ mailboxId, settings });
@@ -124,6 +143,79 @@ export default function SettingsRoute() {
 						The prompt is sent as the system message to the AI model.
 						It controls the agent's personality, writing style, and behavior rules.
 					</p>
+				</div>
+
+				{/* Auto Reply */}
+				<div className="rounded-lg border border-kumo-line bg-kumo-base p-5">
+					<div className="flex items-center justify-between mb-4">
+						<div className="text-sm font-medium text-kumo-default">
+							Auto Reply
+						</div>
+						<label className="flex items-center gap-2 text-xs text-kumo-subtle cursor-pointer select-none">
+							<input
+								type="checkbox"
+								checked={autoReplyEnabled}
+								onChange={(e) => setAutoReplyEnabled(e.target.checked)}
+								className="accent-kumo-ring"
+							/>
+							Enabled
+						</label>
+					</div>
+					<p className="text-xs text-kumo-subtle mb-3">
+						When enabled, every new inbound email gets an instant fixed
+						reply. Bounces, no-reply senders, and other automated mail are
+						ignored to prevent loops.
+					</p>
+					<div className="space-y-3">
+						<Input
+							label="Subject"
+							value={autoReplySubject}
+							onChange={(e) => setAutoReplySubject(e.target.value)}
+							placeholder="Thanks for your email!"
+						/>
+						<div>
+							<label className="block text-xs font-medium text-kumo-default mb-1">
+								Message
+							</label>
+							<textarea
+								value={autoReplyMessage}
+								onChange={(e) => setAutoReplyMessage(e.target.value)}
+								placeholder="Hi, thanks for reaching out. This inbox is monitored during business hours — we'll get back to you within 24 hours."
+								rows={5}
+								className="w-full resize-y rounded-lg border border-kumo-line bg-kumo-recessed px-3 py-2 text-xs text-kumo-default placeholder:text-kumo-subtle focus:outline-none focus:ring-1 focus:ring-kumo-ring"
+							/>
+						</div>
+					</div>
+				</div>
+
+				{/* Forwarding */}
+				<div className="rounded-lg border border-kumo-line bg-kumo-base p-5">
+					<div className="flex items-center justify-between mb-4">
+						<div className="text-sm font-medium text-kumo-default">
+							Forwarding
+						</div>
+						<label className="flex items-center gap-2 text-xs text-kumo-subtle cursor-pointer select-none">
+							<input
+								type="checkbox"
+								checked={forwardingEnabled}
+								onChange={(e) => setForwardingEnabled(e.target.checked)}
+								className="accent-kumo-ring"
+							/>
+							Enabled
+						</label>
+					</div>
+					<p className="text-xs text-kumo-subtle mb-3">
+						Send a copy of every new inbound email to another address —
+						handy for getting new-mail notifications on your phone's
+						regular email app.
+					</p>
+					<Input
+						label="Forward to"
+						type="email"
+						value={forwardingEmail}
+						onChange={(e) => setForwardingEmail(e.target.value)}
+						placeholder="you@personal.com"
+					/>
 				</div>
 
 				{/* Save */}

@@ -18,6 +18,7 @@ import {
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
+import { handleAutoResponse } from "./lib/auto-respond";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
 
@@ -407,6 +408,17 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		method: "POST", headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
 	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
+
+	// Auto-reply + forwarding (mailbox settings), fire-and-forget.
+	// Guarded so automated/bounce/loop mail never triggers a response.
+	ctx.waitUntil(handleAutoResponse(env, mailboxId,
+		await (async () => {
+			try {
+				const cfg = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
+				return cfg ? await cfg.json() : undefined;
+			} catch { return undefined; }
+		})(),
+		parsedEmail as never, rawEmail.buffer as ArrayBuffer));
 }
 
 export { app, receiveEmail };
