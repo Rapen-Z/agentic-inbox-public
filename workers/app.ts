@@ -42,19 +42,62 @@ function getAccessUrls(teamDomain: string) {
 // Main app that wraps the API and adds React Router fallback
 const app = new Hono<{ Bindings: Env }>();
 
-// Cloudflare Access JWT validation middleware (production only)
+// Auth middleware (production): ADMIN_TOKEN password login OR Cloudflare Access JWT.
+// Mode is chosen by which secrets are set:
+//   ADMIN_TOKEN set            -> simple bearer/session-password auth (bootstrap / stopgap)
+//   POLICY_AUD+TEAM_DOMAIN set -> Cloudflare Access JWT validation (standard, preferred)
+//   neither                    -> fail closed
 app.use("*", async (c, next) => {
 	// Skip validation in development
 	if (import.meta.env.DEV) {
 		return next();
 	}
 
-	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
+	const { POLICY_AUD, TEAM_DOMAIN, ADMIN_TOKEN } = c.env;
 
-	// Fail closed in production if Access is not configured.
+	// Mode 1: simple admin token auth (stopgap until Cloudflare Access is configured)
+	if (ADMIN_TOKEN) {
+		if (c.req.path === "/auth/login") return next(); // login endpoint itself is open
+		if (c.req.method === "OPTIONS") return next(); // CORS preflight carries no auth
+
+		// Expected credential for both header and cookie comparisons.
+		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ADMIN_TOKEN));
+		const expected = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+		const header =
+			c.req.header("authorization") ||
+			c.req.header("x-admin-token") ||
+			c.req.header("cf-access-jwt-assertion");
+		const cookies = Object.fromEntries(
+			(c.req.header("cookie") || "").split(";").map((p) => p.trim().split("=", 2)).filter((p) => p.length === 2),
+		);
+		if (header === `Bearer ${ADMIN_TOKEN}` || header === ADMIN_TOKEN || cookies["agentic_auth"] === expected) {
+			return next();
+		}
+		// API clients (MCP, agent tools) authenticate via header; browsers get the login page.
+		const isApi =
+			c.req.path.startsWith("/api/") || c.req.path.startsWith("/mcp");
+		if (isApi) {
+			return c.text("Unauthorized: pass Authorization: Bearer <ADMIN_TOKEN>", 401);
+		}
+		return c.html(
+			`<!doctype html><html><head><meta charset="utf-8"><title>Login</title>` +
+			`<meta name="viewport" content="width=device-width,initial-scale=1"></head>` +
+			`<body style="font-family:system-ui;background:#0f1117;color:#e6e6e6;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">` +
+			`<form method="POST" action="/auth/login" style="background:#1a1d27;padding:2rem;border-radius:12px;min-width:320px">` +
+			`<h2 style="margin:0 0 1rem">🔐 Agentic Inbox</h2>` +
+			`<input type="password" name="token" placeholder="Admin token" required ` +
+			`style="width:100%;padding:.6rem;border-radius:8px;border:1px solid #33363f;background:#0f1117;color:#e6e6e6;box-sizing:border-box">` +
+			`<button type="submit" style="margin-top:1rem;width:100%;padding:.6rem;border-radius:8px;border:0;background:#4f7cff;color:#fff;font-weight:600;cursor:pointer">Sign in</button>` +
+			`</form></body></html>`,
+			401,
+		);
+	}
+
+	// Mode 2: Cloudflare Access JWT validation (standard path)
 	if (!POLICY_AUD || !TEAM_DOMAIN) {
 		return c.text(
-			"Cloudflare Access must be configured in production. Set POLICY_AUD and TEAM_DOMAIN.",
+			"Cloudflare Access must be configured in production. Set POLICY_AUD and TEAM_DOMAIN (or ADMIN_TOKEN as a stopgap).",
 			500,
 		);
 	}
@@ -78,6 +121,24 @@ app.use("*", async (c, next) => {
 	// Authorization model note: once a teammate passes the shared Cloudflare
 	// Access policy, they can access all mailboxes in this app by design.
 	return next();
+});
+
+// Admin-token login: sets an httpOnly session cookie (SHA-256 of ADMIN_TOKEN).
+// Only active when ADMIN_TOKEN is configured (stopgap before Cloudflare Access).
+app.post("/auth/login", async (c) => {
+	const { ADMIN_TOKEN } = c.env;
+	const form = await c.req.parseBody();
+	const token = typeof form.token === "string" ? form.token : "";
+	if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+		return c.text("Invalid token", 403);
+	}
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ADMIN_TOKEN));
+	const expected = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+	c.header(
+		"Set-Cookie",
+		`agentic_auth=${expected}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`,
+	);
+	return c.redirect("/");
 });
 
 // MCP server endpoint — used by AI coding tools (ProtoAgent, Claude Code, Cursor, etc.)
