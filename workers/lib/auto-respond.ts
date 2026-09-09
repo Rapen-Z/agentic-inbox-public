@@ -15,7 +15,7 @@
  * to bounces, auto-submitted mail, our own markers, or ourselves.
  */
 
-import { sendEmail } from "../email-sender";
+import { sendUnified } from "./send-provider";
 import { generateMessageId } from "./email-helpers";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
@@ -127,7 +127,7 @@ export async function handleAutoResponse(
 				.replace(/&/g, "&amp;")
 				.replace(/</g, "&lt;")}</div>`;
 
-			await sendEmail(env.EMAIL, {
+			await sendUnified(env, {
 				to: sender,
 				from,
 				subject: ar.subject,
@@ -137,7 +137,7 @@ export async function handleAutoResponse(
 					[LOOP_MARKER]: "1",
 					"Auto-Submitted": "auto-replied",
 					"In-Reply-To": `<${parsed.messageId || ""}>`,
-				} as Record<string, string>,
+				},
 			});
 			console.log(`Auto-reply sent from ${mailboxId} to ${sender}`);
 
@@ -177,7 +177,7 @@ export async function handleAutoResponse(
 				mailboxId.split("@")[1] || "localhost",
 			);
 			const fwdHtml = wrapForwardHtml(parsed, mailboxId);
-			await sendEmail(env.EMAIL, {
+			await sendUnified(env, {
 				to: fw.email,
 				from,
 				subject: `Fwd: ${subject}`,
@@ -185,7 +185,7 @@ export async function handleAutoResponse(
 				text: parsed.text || undefined,
 				// Loop-safe: forwarded copies carry the marker so a forwarded
 				// account that also auto-replies can never ping-pong with us.
-				headers: { [LOOP_MARKER]: "1" } as Record<string, string>,
+				headers: { [LOOP_MARKER]: "1" },
 			});
 			console.log(`Forwarded ${mailboxId} mail to ${fw.email}`);
 		}
