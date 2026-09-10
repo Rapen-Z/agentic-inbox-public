@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-import type { Email, Folder, Mailbox } from "~/types";
+import type { Email, Folder, Mailbox, SignatureTemplate } from "~/types";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -99,8 +99,18 @@ const api = {
 	getConfig: () =>
 		get<{ domains: string[]; emailAddresses: string[] }>("/api/v1/config"),
 
+	// Global settings
+	getSignatureTemplate: () =>
+		get<SignatureTemplate>("/api/v1/settings/signature-template"),
+	updateSignatureTemplate: (data: SignatureTemplate) =>
+		put<SignatureTemplate>("/api/v1/settings/signature-template", data),
+	addDomain: (domain: string) =>
+		post<{ domains: string[] }>("/api/v1/settings/domains", { domain }),
+
 	// Mailboxes
 	listMailboxes: () => get<Mailbox[]>("/api/v1/mailboxes"),
+	getUnreadSummary: () =>
+		get<Array<{ mailboxId: string; unreadCount: number }>>("/api/v1/unread-summary"),
 	createMailbox: (email: string, name: string, settings?: unknown) =>
 		post<Mailbox>("/api/v1/mailboxes", { email, name, settings }),
 	getMailbox: (mailboxId: string) =>

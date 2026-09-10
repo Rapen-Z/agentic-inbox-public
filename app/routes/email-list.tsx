@@ -36,6 +36,14 @@ import type { Email } from "~/types";
 
 const PAGE_SIZE = 25;
 
+const FOLDER_LABELS: Record<string, string> = {
+	inbox: "收件箱",
+	sent: "已发送",
+	draft: "草稿",
+	archive: "归档",
+	trash: "垃圾箱",
+};
+
 const FOLDER_EMPTY_STATES: Record<
 	string,
 	{
@@ -47,36 +55,36 @@ const FOLDER_EMPTY_STATES: Record<
 > = {
 	[Folders.INBOX]: {
 		icon: <TrayIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "Your inbox is empty",
+		title: "收件箱是空的",
 		description:
-			"New emails will appear here when they arrive. Send an email to get the conversation started.",
+			"新邮件到达后会显示在这里。先写一封信开始对话。",
 		showCompose: true,
 	},
 	[Folders.SENT]: {
 		icon: (
 			<PaperPlaneTiltIcon size={48} weight="thin" className="text-kumo-subtle" />
 		),
-		title: "No sent emails",
-		description: "Emails you send will show up here.",
+		title: "还没有已发送邮件",
+		description: "你发出的邮件会出现在这里。",
 		showCompose: true,
 	},
 	[Folders.DRAFT]: {
 		icon: <FileIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "No drafts",
-		description: "Emails you're still working on will be saved here.",
+		title: "没有草稿",
+		description: "还在写的邮件会保存在这里。",
 		showCompose: true,
 	},
 	[Folders.ARCHIVE]: {
 		icon: <ArchiveIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "Archive is empty",
+		title: "归档是空的",
 		description:
-			"Move emails here to keep your inbox clean without deleting them.",
+			"把邮件移到这里，收件箱更干净，又不会删掉它们。",
 	},
 	[Folders.TRASH]: {
 		icon: <TrashIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "Trash is empty",
+		title: "垃圾箱是空的",
 		description:
-			"Deleted emails will appear here. You can restore them or permanently delete them.",
+			"删除的邮件会出现在这里。可以恢复，也可以永久删除。",
 	},
 };
 
@@ -113,8 +121,8 @@ function FolderEmptyState({
 		icon: (
 			<EnvelopeSimpleIcon size={48} weight="thin" className="text-kumo-subtle" />
 		),
-		title: "No emails",
-		description: "This folder is empty.",
+		title: "没有邮件",
+		description: "这个文件夹是空的。",
 	};
 
 	return (
@@ -133,7 +141,7 @@ function FolderEmptyState({
 					icon={<PencilSimpleIcon size={16} />}
 					onClick={onCompose}
 				>
-					Compose
+					写邮件
 				</Button>
 			)}
 		</div>
@@ -179,9 +187,10 @@ export default function EmailListRoute() {
 	const { data: folders = [] } = useFolders(mailboxId);
 
 	const folderName = useMemo(() => {
+		if (folder && FOLDER_LABELS[folder]) return FOLDER_LABELS[folder];
 		const found = folders.find((f) => f.id === folder);
 		if (found) return found.name;
-		return folder ? folder.charAt(0).toUpperCase() + folder.slice(1) : "Inbox";
+		return folder ? folder.charAt(0).toUpperCase() + folder.slice(1) : "收件箱";
 	}, [folders, folder]);
 
 	const isPanelOpen = selectedEmailId !== null || isComposing;
@@ -214,7 +223,7 @@ export default function EmailListRoute() {
 		e.preventDefault();
 		e.stopPropagation();
 		if (mailboxId) {
-			const confirmed = window.confirm("Are you sure you want to delete this email?");
+			const confirmed = window.confirm("确定删除这封邮件吗？");
 			if (!confirmed) return;
 			deleteEmail.mutate({ mailboxId, id: emailId });
 			if (selectedEmailId === emailId) closePanel();
@@ -274,18 +283,18 @@ export default function EmailListRoute() {
 			isComposing={isComposing}
 		>
 				{/* Folder header */}
-				<div className="flex items-center justify-between px-4 py-3.5 border-b border-kumo-line shrink-0 md:px-5">
-					<h1 className="text-lg font-semibold text-kumo-default">
+				<div className="flex items-center justify-between gap-3 px-4 py-3.5 border-b border-kumo-line shrink-0 min-w-0 md:px-5">
+					<h1 className="text-lg font-semibold text-kumo-default truncate min-w-0">
 						{folderName}
 					</h1>
 					<div className="flex items-center gap-1">
 						{totalCount > 0 && (
 							<span className="text-sm text-kumo-subtle mr-2 hidden sm:inline">
-								{totalCount} conversation{totalCount !== 1 ? "s" : ""}
+								{totalCount} 封会话
 							</span>
 						)}
 						<Tooltip
-							content={isRefreshing ? "Refreshing..." : "Refresh"}
+							content={isRefreshing ? "刷新中…" : "刷新"}
 							side="bottom"
 							asChild
 						>
@@ -301,14 +310,14 @@ export default function EmailListRoute() {
 								}
 								onClick={handleRefresh}
 								disabled={isRefreshing}
-								aria-label="Refresh"
+								aria-label="刷新"
 							/>
 						</Tooltip>
 					</div>
 				</div>
 
 				{/* Email rows */}
-				<div className="flex-1 overflow-y-auto">
+				<div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden">
 				{isRefreshing && emails.length === 0 ? (
 					<EmailListSkeleton />
 				) : emails.length > 0 ? (
@@ -328,7 +337,7 @@ export default function EmailListRoute() {
 												handleRowClick(email);
 											}
 										}}
-										className={`group flex items-center gap-3 w-full text-left cursor-pointer transition-colors border-b border-kumo-line px-4 py-2.5 md:px-6 md:py-3 ${
+										className={`group flex items-center gap-3 w-full min-w-0 overflow-hidden text-left cursor-pointer transition-colors border-b border-kumo-line px-4 py-2.5 md:px-6 md:py-3 ${
 											isPanelOpen ? "md:px-4 md:py-2.5" : ""
 										} ${isSelected ? "bg-kumo-tint" : "hover:bg-kumo-tint"}`}
 									>
@@ -359,11 +368,19 @@ export default function EmailListRoute() {
 											/>
 										</button>
 
-										{/* Content */}
-										<div className="min-w-0 flex-1">
-											<div className="flex items-center gap-2">
+										{/* Content: stacked on narrow/split, one line on wide screens */}
+										<div
+											className={`min-w-0 flex-1 overflow-hidden ${
+												isPanelOpen ? "" : "lg:flex lg:items-center lg:gap-3"
+											}`}
+										>
+											<div
+												className={`flex items-center gap-2 min-w-0 ${
+													isPanelOpen ? "" : "lg:w-44 lg:shrink-0"
+												}`}
+											>
 												<span
-													className={`truncate text-sm ${hasUnread(email) ? "font-semibold text-kumo-default" : "text-kumo-strong"}`}
+													className={`truncate min-w-0 text-sm ${hasUnread(email) ? "font-semibold text-kumo-default" : "text-kumo-strong"}`}
 												>
 													{formatParticipants(email)}
 												</span>
@@ -374,21 +391,25 @@ export default function EmailListRoute() {
 												)}
 												{email.has_draft && (
 													<span className="shrink-0 text-xs text-kumo-destructive font-medium">
-														Draft
+														草稿
 													</span>
 												)}
 												{email.needs_reply && !email.has_draft && (
-													<Tooltip content="Needs reply" asChild>
+													<Tooltip content="待回复" asChild>
 														<span className="shrink-0 text-kumo-warning">
 															<ArrowBendUpLeftIcon size={14} weight="bold" />
 														</span>
 													</Tooltip>
 												)}
-												<span className="text-sm text-kumo-subtle shrink-0 ml-auto">
+												<span
+													className={`text-sm text-kumo-subtle shrink-0 ${
+														isPanelOpen ? "ml-auto" : "ml-auto lg:hidden"
+													}`}
+												>
 													{formatListDate(email.date)}
 												</span>
 											</div>
-											<div className="truncate text-sm mt-0.5">
+											<div className="min-w-0 flex-1 truncate text-sm mt-0.5 lg:mt-0">
 												<span
 													className={hasUnread(email) ? "font-medium text-kumo-default" : "text-kumo-subtle"}
 												>
@@ -400,11 +421,16 @@ export default function EmailListRoute() {
 												</span>
 											)}
 										</div>
+											{!isPanelOpen && (
+												<span className="hidden lg:inline text-sm text-kumo-subtle shrink-0">
+													{formatListDate(email.date)}
+												</span>
+											)}
 									</div>
 
 										{/* Hover actions */}
 										<div className="hidden group-hover:flex items-center shrink-0">
-											<Tooltip content={email.read ? "Mark unread" : "Mark read"} asChild>
+											<Tooltip content={email.read ? "标为未读" : "标为已读"} asChild>
 												<Button
 													variant="ghost"
 													shape="square"
@@ -419,17 +445,17 @@ export default function EmailListRoute() {
 																data: { read: !email.read },
 															});
 													}}
-													aria-label={email.read ? "Mark unread" : "Mark read"}
+													aria-label={email.read ? "标为未读" : "标为已读"}
 												/>
 											</Tooltip>
-											<Tooltip content="Delete" asChild>
+											<Tooltip content="删除" asChild>
 												<Button
 													variant="ghost"
 													shape="square"
 													size="sm"
 													icon={<TrashIcon size={14} />}
 													onClick={(e) => handleDelete(e, email.id)}
-													aria-label="Delete"
+													aria-label="删除"
 												/>
 											</Tooltip>
 										</div>

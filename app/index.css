@@ -2,9 +2,14 @@
 @import "@cloudflare/kumo/styles/tailwind";
 @import "tailwindcss";
 
+html,
 body {
   margin: 0;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
+
 
 /* TipTap list styles */
 .ProseMirror ul {
@@ -24,4 +29,38 @@ body {
 .ProseMirror li {
   margin-top: 0.25em;
   margin-bottom: 0.25em;
+}
+
+
+/* Split list + reading pane. Flex + fixed list width so Windows zoom cannot crush the list. */
+.mailbox-split {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.mailbox-split.is-closed .mailbox-split-list {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.mailbox-split.is-open .mailbox-split-list {
+  display: none;
+}
+.mailbox-split-read {
+  flex: 1 1 0%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+@media (min-width: 640px) {
+  .mailbox-split.is-open .mailbox-split-list {
+    display: flex;
+    flex: 0 0 280px;
+    width: 280px;
+    min-width: 280px !important;
+    max-width: 280px;
+    border-right: 1px solid var(--color-kumo-line, #e5e5e5);
+  }
 }
