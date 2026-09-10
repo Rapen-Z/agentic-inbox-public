@@ -3,10 +3,11 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { useKumoToastManager } from "@cloudflare/kumo";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	buildQuotedReplyBlock,
 	escapeHtml,
+	formatBytes,
 	formatComposeDate,
 	getSignatureBlock,
 	htmlToPlainText,
@@ -14,8 +15,10 @@ import {
 	stripHtml,
 	toEmailListValue,
 } from "~/lib/utils";
+import { optimizeImageLossless } from "~/lib/lossless-image-optimizer";
 import { useDeleteEmail, useForwardEmail, useReplyToEmail, useSaveDraft, useSendEmail } from "~/queries/emails";
 import { useMailbox } from "~/queries/mailboxes";
+import { useSignatureTemplate } from "~/queries/settings";
 import { useUIStore } from "~/hooks/useUIStore";
 
 function appendUniqueAddress(
@@ -51,6 +54,19 @@ const EMPTY_FIELDS: ComposeFormFields = {
 	subject: "",
 	body: "",
 };
+
+export interface PendingAttachment {
+	id: string;
+	filename: string;
+	type: string;
+	size: number;
+	contentBase64: string;
+	disposition: "attachment" | "inline";
+}
+
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB per file
+const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total
+const MAX_FILE_COUNT = 10;
 
 function getPrefixedSubject(subject: string, prefix: "Re" | "Fwd") {
 	const expectedPrefix = `${prefix}: `;
@@ -166,6 +182,7 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 	const toastManager = useKumoToastManager();
 	const { composeOptions, closePanel, closeCompose } = useUIStore();
 	const { data: currentMailbox } = useMailbox(mailboxId);
+	const { data: signatureTemplate, isFetched: templateFetched } = useSignatureTemplate();
 	const sendEmailMutation = useSendEmail();
 	const saveDraftMutation = useSaveDraft();
 	const replyMutation = useReplyToEmail();
@@ -181,17 +198,23 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 	const [error, setError] = useState<string | null>(null);
 	const [isSavingDraft, setIsSavingDraft] = useState(false);
 	const [isSending, setIsSending] = useState(false);
+	const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
 	const lastInitializedOptionsRef = useRef<typeof composeOptions | null>(null);
 	const isDraftEdit = !!composeOptions.draftEmail;
+	const editorInsertImageRef = useRef<((src: string, alt?: string) => void) | null>(null);
 
 	const formTitle = useMemo(() => {
-		if (isDraftEdit) return "Edit Draft";
-		switch (composeOptions.mode) { case "reply": return "Reply"; case "reply-all": return "Reply All"; case "forward": return "Forward"; default: return "New Message"; }
+		if (isDraftEdit) return "编辑草稿";
+		switch (composeOptions.mode) { case "reply": return "回复"; case "reply-all": return "回复全部"; case "forward": return "转发"; default: return "新邮件"; }
 	}, [composeOptions.mode, isDraftEdit]);
 
-	const sigBlock = useMemo(() => getSignatureBlock(currentMailbox?.settings), [currentMailbox]);
+	const sigBlock = useMemo(
+		() => getSignatureBlock(currentMailbox?.settings, signatureTemplate, currentMailbox),
+		[currentMailbox, signatureTemplate],
+	);
 
 	useEffect(() => {
+		if (!templateFetched) return;
 		if (lastInitializedOptionsRef.current === composeOptions) return;
 		lastInitializedOptionsRef.current = composeOptions;
 
@@ -207,7 +230,101 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 		setShowCcBcc(initialFields.showCcBcc);
 		setSubject(initialFields.subject);
 		setBody(initialFields.body);
-	}, [composeOptions, currentMailbox?.email, sigBlock]);
+		setAttachments([]);
+	}, [composeOptions, currentMailbox?.email, sigBlock, templateFetched]);
+
+	const handleAddAttachments = useCallback(async (files: FileList | File[] | null) => {
+		if (!files || files.length === 0) return;
+
+		const newAttachments: PendingAttachment[] = [];
+		let totalSize = attachments.reduce((sum, att) => sum + att.size, 0);
+
+		const fileArray = Array.from(files);
+		for (let i = 0; i < fileArray.length; i++) {
+			let file = fileArray[i];
+
+			if (attachments.length + newAttachments.length >= MAX_FILE_COUNT) {
+				setError(`最多只能添加 ${MAX_FILE_COUNT} 个附件。`);
+				break;
+			}
+
+			// Optimize images losslessly before size checks
+			if (file.type.startsWith("image/")) {
+				try {
+					const result = await optimizeImageLossless(file);
+					if (result.saved > 0) {
+						file = result.optimizedFile;
+						// Show toast for meaningful savings (> 100KB)
+						if (result.saved > 100 * 1024) {
+							toastManager.add({
+								title: `图片已无损优化：${formatBytes(result.originalSize)} → ${formatBytes(result.optimizedSize)}`,
+							});
+						}
+					}
+				} catch (err) {
+					console.warn('Failed to optimize image:', err);
+					// Continue with original file
+				}
+			}
+
+			if (file.size > MAX_FILE_SIZE) {
+				setError(`文件 "${file.name}" 太大（无损压缩后仍超过 25MB 限制）。`);
+				continue;
+			}
+
+			if (totalSize + file.size > MAX_TOTAL_SIZE) {
+				setError(`附件总大小超过限制（最大 50MB）。`);
+				break;
+			}
+
+			try {
+				const base64 = await new Promise<string>((resolve, reject) => {
+					const reader = new FileReader();
+					reader.onload = () => {
+						const result = reader.result as string;
+						const base64Data = result.split(',')[1];
+						resolve(base64Data);
+					};
+					reader.onerror = () => reject(reader.error);
+					reader.readAsDataURL(file);
+				});
+
+				const isImage = file.type.startsWith("image/");
+				
+				// For images, insert into editor and mark as inline
+				if (isImage && editorInsertImageRef.current) {
+					const dataUrl = `data:${file.type};base64,${base64}`;
+					editorInsertImageRef.current(dataUrl, file.name);
+				}
+
+				newAttachments.push({
+					id: `${Date.now()}-${i}`,
+					filename: file.name,
+					type: file.type || "application/octet-stream",
+					size: file.size,
+					contentBase64: base64,
+					disposition: isImage ? "inline" : "attachment",
+				});
+
+				totalSize += file.size;
+			} catch (err) {
+				setError(`无法读取文件 "${file.name}"。`);
+			}
+		}
+
+		if (newAttachments.length > 0) {
+			setAttachments(prev => [...prev, ...newAttachments]);
+			toastManager.add({ title: `已添加 ${newAttachments.length} 个附件` });
+		}
+	}, [attachments, toastManager]);
+
+	const handleRemoveAttachment = useCallback((id: string) => {
+		setAttachments(prev => prev.filter(att => att.id !== id));
+	}, []);
+
+	const setEditorInsertImage = useCallback((fn: (src: string, alt?: string) => void) => {
+		editorInsertImageRef.current = fn;
+	}, []);
 
 	const handleSaveDraft = async () => {
 		if (!mailboxId || isSending) return; setIsSavingDraft(true); setError(null);
@@ -222,10 +339,10 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 				thread_id: composeOptions.originalEmail?.thread_id || composeOptions.draftEmail?.thread_id || undefined,
 				draft_id: composeOptions.draftEmail?.id || undefined,
 			} });
-			toastManager.add({ title: "Draft saved!" });
+			toastManager.add({ title: "草稿已保存" });
 		}
 		catch (err: unknown) {
-			const message = (err instanceof Error ? err.message : null) || "Failed to save draft.";
+			const message = (err instanceof Error ? err.message : null) || "保存草稿失败。";
 			setError(message);
 			toastManager.add({ title: message, variant: "error" });
 		}
@@ -234,33 +351,70 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 
 	const handleSend = async (e: FormEvent, onClose: () => void) => {
 		e.preventDefault(); if (isSending) return; setError(null);
-		if (!currentMailbox || !mailboxId) { setError("No mailbox selected."); return; }
+		if (!currentMailbox || !mailboxId) { setError("未选择邮箱。"); return; }
 		const toRecipients = splitEmailList(to);
-		if (toRecipients.length === 0) { setError("Add at least one recipient."); return; }
+		if (toRecipients.length === 0) { setError("请至少填写一位收件人。"); return; }
 		const ccRecipients = splitEmailList(cc); const bccRecipients = splitEmailList(bcc);
 		const fromName = currentMailbox.settings?.fromName || currentMailbox.name;
 		const from = fromName && fromName !== currentMailbox.email ? { email: currentMailbox.email, name: fromName } : currentMailbox.email;
+		
+		// Process inline images: convert data URLs to CID references
+		let processedHtml = body;
+		const processedAttachments = attachments.map(att => {
+			const isInlineImage = att.disposition === "inline" && att.type.startsWith("image/");
+			
+			// For inline images, generate contentId and replace in HTML
+			if (isInlineImage) {
+				const contentId = `img-${att.id}`;
+				const dataUrl = `data:${att.type};base64,${att.contentBase64}`;
+				const escapedDataUrl = dataUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				processedHtml = processedHtml.replace(
+					new RegExp(`src="${escapedDataUrl}"`, 'g'),
+					`src="cid:${contentId}"`
+				);
+				
+				return {
+					content: att.contentBase64,
+					filename: att.filename,
+					type: att.type,
+					disposition: att.disposition,
+					contentId,
+				};
+			}
+			
+			return {
+				content: att.contentBase64,
+				filename: att.filename,
+				type: att.type,
+				disposition: att.disposition,
+			};
+		});
+		
 		const emailData = {
 			to: toEmailListValue(toRecipients),
 			cc: toEmailListValue(ccRecipients),
 			bcc: toEmailListValue(bccRecipients),
 			from,
 			subject,
-			html: body,
-			text: htmlToPlainText(body),
+			html: processedHtml,
+			text: htmlToPlainText(processedHtml),
+			...(processedAttachments.length > 0 ? { attachments: processedAttachments } : {}),
 		};
 		const draftId = composeOptions.draftEmail?.id; const mode = composeOptions.mode; const originalId = composeOptions.originalEmail?.id || composeOptions.draftEmail?.in_reply_to;
-		setIsSending(true); toastManager.add({ title: "Sending email..." });
+		setIsSending(true); toastManager.add({ title: "正在发送…" });
 		try {
 			if ((mode === "reply" || mode === "reply-all") && originalId) await replyMutation.mutateAsync({ mailboxId, emailId: originalId, email: emailData });
 			else if (mode === "forward" && originalId) await forwardMutation.mutateAsync({ mailboxId, emailId: originalId, email: emailData });
 			else await sendEmailMutation.mutateAsync({ mailboxId, email: emailData });
 			if (draftId) deleteEmailMutation.mutate({ mailboxId, id: draftId });
-			toastManager.add({ title: "Email sent!" });
+			toastManager.add({ title: "邮件已发送" });
 			onClose();
-		} catch (err: unknown) { const message = (err instanceof Error ? err.message : null) || "Failed to send email."; setError(message); toastManager.add({ title: message, variant: "error" }); }
+		} catch (err: unknown) { const message = (err instanceof Error ? err.message : null) || "发送失败。"; setError(message); toastManager.add({ title: message, variant: "error" }); }
 		finally { setIsSending(false); }
 	};
 
-	return { to, setTo, cc, setCc, bcc, setBcc, showCcBcc, setShowCcBcc, subject, setSubject, body, setBody, error, setError, isSavingDraft, isSending, formTitle, handleSaveDraft, handleSend, closeCompose, closePanel };
+	const sendAsName = currentMailbox?.settings?.fromName || currentMailbox?.name || "";
+	const sendAsEmail = currentMailbox?.email || mailboxId || "";
+
+	return { to, setTo, cc, setCc, bcc, setBcc, showCcBcc, setShowCcBcc, subject, setSubject, body, setBody, error, setError, isSavingDraft, isSending, formTitle, sendAsName, sendAsEmail, handleSaveDraft, handleSend, closeCompose, closePanel, attachments, handleAddAttachments, handleRemoveAttachment, setEditorInsertImage };
 }

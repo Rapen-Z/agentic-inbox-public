@@ -20,6 +20,8 @@ export default function MailboxRoute() {
 		isSidebarOpen,
 		closeSidebar,
 		isAgentPanelOpen,
+		closeAgentPanel,
+		selectedEmailId,
 		closePanel,
 		closeComposeModal,
 	} = useUIStore();
@@ -38,33 +40,55 @@ export default function MailboxRoute() {
 		prevMailboxIdRef.current = mailboxId;
 	}, [mailboxId, closeComposeModal, closePanel, closeSidebar]);
 
+	useEffect(() => {
+		if (!mailboxId) return;
+		try {
+			localStorage.setItem("inbox:lastMailboxId", mailboxId);
+		} catch {
+			// ignore quota / private mode
+		}
+	}, [mailboxId]);
+
+	useEffect(() => {
+		const collapseIfNeeded = () => {
+			if (window.innerWidth < 1280) closeAgentPanel();
+		};
+		collapseIfNeeded();
+		window.addEventListener("resize", collapseIfNeeded);
+		return () => window.removeEventListener("resize", collapseIfNeeded);
+	}, [closeAgentPanel]);
+
+	useEffect(() => {
+		if (selectedEmailId) closeAgentPanel();
+	}, [selectedEmailId, closeAgentPanel]);
+
 	return (
-		<div className="flex h-screen overflow-hidden">
+		<div className="flex h-screen w-full max-w-full min-w-0 overflow-hidden">
 			{/* Mobile sidebar overlay backdrop */}
 			{isSidebarOpen && (
 				<div
-					className="fixed inset-0 z-30 bg-black/30 md:hidden"
+					className="fixed inset-0 z-30 bg-black/30 sm:hidden"
 					onClick={closeSidebar}
 					onKeyDown={(e) => e.key === "Escape" && closeSidebar()}
 					role="button"
 					tabIndex={-1}
-					aria-label="Close sidebar"
+					aria-label="关闭侧栏"
 				/>
 			)}
 
 			{/* Sidebar: hidden on mobile by default, shown as overlay when open */}
 			<div
-				className={`fixed inset-y-0 left-0 z-40 w-64 transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0 md:z-0 ${
-					isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+				className={`fixed inset-y-0 left-0 z-40 w-64 shrink-0 transform transition-transform duration-200 ease-in-out sm:relative sm:translate-x-0 sm:z-0 ${
+					isSidebarOpen ? "translate-x-0" : "-translate-x-full sm:translate-x-0"
 				}`}
 			>
 				<Sidebar />
 			</div>
 
 			{/* Main content */}
-			<div className="flex-1 flex flex-col min-w-0 bg-kumo-base">
+			<div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-kumo-base">
 				<Header />
-				<main className="flex-1 overflow-hidden">
+				<main className="flex-1 min-w-0 overflow-hidden">
 					<Outlet />
 				</main>
 			</div>

@@ -6,7 +6,6 @@ import { type Context, Hono } from "hono";
 import { cors } from "hono/cors";
 import PostalMime from "postal-mime";
 import { z } from "zod";
-import { sendEmail } from "./email-sender";
 import { storeAttachments, type StoredAttachment } from "./lib/attachments";
 import {
 	validateSender,
@@ -18,10 +17,14 @@ import {
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
-import { handleAutoResponse } from "./lib/auto-respond";
 import { sendUnified } from "./lib/send-provider";
+import { handleAutoResponse } from "./lib/auto-respond";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
+import {
+	renderSignatureTemplate,
+	SIGNATURE_TEMPLATE_KEY,
+} from "../shared/signature-template";
 
 type AppContext = Context<MailboxContext>;
 
@@ -31,6 +34,11 @@ const CreateMailboxBody = z.object({
 	email: z.string().email(),
 	name: z.string().min(1),
 	settings: z.record(z.any()).optional(), // unvalidated — agentSystemPrompt goes straight to AI
+});
+
+const SignatureTemplateBody = z.object({
+	enabled: z.boolean(),
+	text: z.string(),
 });
 
 const DraftBody = z.object({
@@ -65,6 +73,55 @@ function boolQuery(c: AppContext, key: string): boolean | undefined {
 	return v === "true" || v === "1";
 }
 
+async function readSignatureTemplate(bucket: R2Bucket): Promise<{ enabled: boolean; text: string }> {
+	const obj = await bucket.get(SIGNATURE_TEMPLATE_KEY);
+	if (!obj) return { enabled: false, text: "" };
+	const parsed = (await obj.json()) as { enabled?: unknown; text?: unknown };
+	return {
+		enabled: parsed.enabled === true,
+		text: typeof parsed.text === "string" ? parsed.text : "",
+	};
+}
+
+
+const EXTRA_DOMAINS_KEY = "settings/extra-domains.json";
+
+function envDomains(env: Env): string[] {
+	return (env.DOMAINS || "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+}
+
+function normalizeDomain(raw: string): string | null {
+	let d = raw.trim().toLowerCase();
+	d = d.replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/:\d+$/, "");
+	if (d.startsWith("www.")) d = d.slice(4);
+	if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d)) return null;
+	return d;
+}
+
+async function readExtraDomains(bucket: R2Bucket): Promise<string[]> {
+	const obj = await bucket.get(EXTRA_DOMAINS_KEY);
+	if (!obj) return [];
+	const parsed = (await obj.json()) as { domains?: unknown };
+	if (!Array.isArray(parsed.domains)) return [];
+	return parsed.domains
+		.filter((d): d is string => typeof d === "string")
+		.map((d) => d.trim().toLowerCase())
+		.filter(Boolean);
+}
+
+async function writeExtraDomains(bucket: R2Bucket, domains: string[]): Promise<void> {
+	const unique = [...new Set(domains.map((d) => d.trim().toLowerCase()).filter(Boolean))];
+	await bucket.put(EXTRA_DOMAINS_KEY, JSON.stringify({ domains: unique }));
+}
+
+async function allDomains(env: Env): Promise<string[]> {
+	const extras = await readExtraDomains(env.BUCKET);
+	const fromMailboxes = (await listMailboxes(env.BUCKET))
+		.map((m) => (m.email || m.id || "").split("@")[1]?.toLowerCase())
+		.filter(Boolean) as string[];
+	return [...new Set([...envDomains(env), ...extras, ...fromMailboxes])];
+}
+
 // -- App & middleware -----------------------------------------------
 
 const app = new Hono<MailboxContext>();
@@ -87,14 +144,69 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 
 // -- Config ---------------------------------------------------------
 
-app.get("/api/v1/config", (c) => {
-	const domainsRaw = c.env.DOMAINS || "";
-	const domains = domainsRaw.split(",").map((d) => d.trim()).filter(Boolean);
+app.get("/api/v1/config", async (c) => {
+	const domains = await allDomains(c.env);
 	const emailAddresses = c.env.EMAIL_ADDRESSES ?? [];
 	return c.json({ domains, emailAddresses });
 });
 
+const DomainBody = z.object({
+	domain: z.string().min(1),
+});
+
+app.post("/api/v1/settings/domains", async (c) => {
+	const { domain: raw } = DomainBody.parse(await c.req.json());
+	const domain = normalizeDomain(raw);
+	if (!domain) return c.json({ error: "域名格式不对" }, 400);
+	const extras = await readExtraDomains(c.env.BUCKET);
+	if (!extras.includes(domain)) {
+		extras.push(domain);
+		await writeExtraDomains(c.env.BUCKET, extras);
+	}
+	return c.json({ domains: await allDomains(c.env) });
+});
+
+app.delete("/api/v1/settings/domains", async (c) => {
+	const { domain: raw } = DomainBody.parse(await c.req.json());
+	const domain = normalizeDomain(raw);
+	if (!domain) return c.json({ error: "域名格式不对" }, 400);
+	const extras = (await readExtraDomains(c.env.BUCKET)).filter((d) => d !== domain);
+	await writeExtraDomains(c.env.BUCKET, extras);
+	return c.json({ domains: await allDomains(c.env) });
+});
+
+// -- Global settings ------------------------------------------------
+
+app.get("/api/v1/settings/signature-template", async (c) => {
+	return c.json(await readSignatureTemplate(c.env.BUCKET));
+});
+
+app.put("/api/v1/settings/signature-template", async (c) => {
+	const body = SignatureTemplateBody.parse(await c.req.json());
+	await c.env.BUCKET.put(SIGNATURE_TEMPLATE_KEY, JSON.stringify(body));
+	return c.json(body);
+});
+
 // -- Mailboxes ------------------------------------------------------
+
+app.get("/api/v1/unread-summary", async (c) => {
+	const allMailboxes = await listMailboxes(c.env.BUCKET);
+	const summary: Array<{ mailboxId: string; unreadCount: number }> = [];
+
+	for (const mailbox of allMailboxes) {
+		const mailboxId = mailbox.email || mailbox.id;
+		try {
+			const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(mailboxId));
+			const unreadCount = await (stub as any).getInboxUnreadCount();
+			summary.push({ mailboxId, unreadCount });
+		} catch (error) {
+			console.error(`Failed to get unread count for ${mailboxId}:`, error);
+			summary.push({ mailboxId, unreadCount: 0 });
+		}
+	}
+
+	return c.json(summary);
+});
 
 app.get("/api/v1/mailboxes", async (c) => {
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
@@ -104,13 +216,22 @@ app.get("/api/v1/mailboxes", async (c) => {
 app.post("/api/v1/mailboxes", async (c) => {
 	const { name, settings, email: rawEmail } = CreateMailboxBody.parse(await c.req.json());
 	const email = rawEmail.toLowerCase();
-	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
-	if (allowedAddresses.length > 0 && !allowedAddresses.map((a) => a.toLowerCase()).includes(email)) {
-		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES" }, 403);
+	const domain = email.split("@")[1] || "";
+	const allowedDomains = await allDomains(c.env);
+	const allowedAddresses = ((c.env.EMAIL_ADDRESSES ?? []) as string[]).map((a) => a.toLowerCase());
+	if (!domain || (!allowedDomains.includes(domain) && !allowedAddresses.includes(email))) {
+		return c.json({ error: "请先接入该域名" }, 403);
 	}
 	const key = `mailboxes/${email}.json`;
 	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
 	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
+	const globalTemplate = await readSignatureTemplate(c.env.BUCKET);
+	if (globalTemplate.enabled && globalTemplate.text) {
+		defaultSettings.signature = {
+			enabled: true,
+			text: renderSignatureTemplate(globalTemplate.text, { email, fromName: name, name }),
+		};
+	}
 	const finalSettings = { ...defaultSettings, ...settings };
 	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
 	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
@@ -353,20 +474,24 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 
 	if (!parsedEmail.to?.length || !parsedEmail.to[0].address) throw new Error("received email with empty to");
 
-	const allowedAddresses = ((env.EMAIL_ADDRESSES ?? []) as string[]).map((a) => a.toLowerCase());
 	const allRecipients = parsedEmail.to.map((t) => t.address?.toLowerCase()).filter(Boolean) as string[];
 	const ccRecipients = (parsedEmail.cc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
 	const bccRecipients = (parsedEmail.bcc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
+	const candidates = [...allRecipients, ...ccRecipients, ...bccRecipients];
 
 	let mailboxId: string | undefined;
-	if (allowedAddresses.length > 0) {
-		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
-	} else { mailboxId = allRecipients[0]; }
-	if (!mailboxId) throw new Error("received email with no valid recipient address");
+	for (const addr of candidates) {
+		if (await env.BUCKET.head(`mailboxes/${addr}.json`)) {
+			mailboxId = addr;
+			break;
+		}
+	}
+	if (!mailboxId) {
+		console.log(`Ignoring email: no existing mailbox among recipients ${candidates.join(", ")}`);
+		return;
+	}
 
 	const messageId = crypto.randomUUID();
-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
 
 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
 

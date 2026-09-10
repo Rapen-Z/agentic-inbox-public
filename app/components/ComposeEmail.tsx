@@ -3,11 +3,13 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { Banner, Button, Dialog, Input, Text } from "@cloudflare/kumo";
-import { FloppyDiskIcon, PaperPlaneTiltIcon } from "@phosphor-icons/react";
+import { FloppyDiskIcon, PaperPlaneTiltIcon, PaperclipIcon, XIcon } from "@phosphor-icons/react";
+import React, { useRef, useState } from "react";
 import { useParams } from "react-router";
 import { useComposeForm } from "~/hooks/useComposeForm";
-import RichTextEditor from "./RichTextEditor";
+import RichTextEditor, { type RichTextEditorRef } from "./RichTextEditor";
 import { useUIStore } from "~/hooks/useUIStore";
+import { formatBytes } from "~/lib/utils";
 
 export default function ComposeEmail() {
 	const { mailboxId, folder } = useParams<{
@@ -16,6 +18,9 @@ export default function ComposeEmail() {
 	}>();
 	
 	const { isComposeModalOpen, closeComposeModal } = useUIStore();
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const editorRef = useRef<RichTextEditorRef>(null);
+	const [isDragging, setIsDragging] = useState(false);
 
 	const {
 		to,
@@ -34,9 +39,68 @@ export default function ComposeEmail() {
 		isSavingDraft,
 		isSending,
 		formTitle,
+		sendAsName,
+		sendAsEmail,
 		handleSaveDraft,
 		handleSend,
+		attachments,
+		handleAddAttachments,
+		handleRemoveAttachment,
+		setEditorInsertImage,
 	} = useComposeForm(mailboxId, folder);
+
+	// Connect editor insertImage function to form
+	React.useEffect(() => {
+		if (editorRef.current && !isSending) {
+			setEditorInsertImage(editorRef.current.insertImage);
+		}
+	}, [setEditorInsertImage, isSending]);
+
+	const handlePaste = (e: React.ClipboardEvent) => {
+		const items = e.clipboardData?.items;
+		if (!items) return;
+
+		// Only handle non-image files at form level
+		// Images are handled by RichTextEditor's onImagePaste
+		const files: File[] = [];
+		for (let i = 0; i < items.length; i++) {
+			const item = items[i];
+			if (item.kind === 'file' && !item.type.startsWith('image/')) {
+				const file = item.getAsFile();
+				if (file) files.push(file);
+			}
+		}
+
+		if (files.length > 0) {
+			e.preventDefault();
+			handleAddAttachments(files);
+		}
+	};
+
+	const handleDragOver = (e: React.DragEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		if (!isDragging) setIsDragging(true);
+	};
+
+	const handleDragLeave = (e: React.DragEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) {
+			setIsDragging(false);
+		}
+	};
+
+	const handleDrop = (e: React.DragEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setIsDragging(false);
+
+		const files = e.dataTransfer?.files;
+		if (files && files.length > 0) {
+			handleAddAttachments(files);
+		}
+	};
 
 	return (
 		<Dialog.Root
@@ -47,12 +111,24 @@ export default function ComposeEmail() {
 				<Dialog.Title className="text-lg font-semibold mb-5">
 					{formTitle}
 				</Dialog.Title>
-				<form onSubmit={(e) => handleSend(e, closeComposeModal)} className="space-y-4">
+				<form 
+					onSubmit={(e) => handleSend(e, closeComposeModal)} 
+					onPaste={handlePaste}
+					onDragOver={handleDragOver}
+					onDragLeave={handleDragLeave}
+					onDrop={handleDrop}
+					className={`space-y-4 relative ${isDragging ? 'ring-2 ring-kumo-link ring-offset-2' : ''}`}
+				>
 					{error && <Banner variant="error" text={error} />}
+					{sendAsEmail && (
+						<div className="text-sm text-kumo-subtle">
+							发件人：{sendAsName && sendAsName !== sendAsEmail ? `${sendAsName} <${sendAsEmail}>` : sendAsEmail}
+						</div>
+					)}
 					<div className="flex items-center gap-2">
 						<div className="flex-1">
 							<Input
-								label="To"
+								label="收件人"
 								type="text"
 								placeholder="recipient@example.com, another@example.com"
 								size="sm"
@@ -78,7 +154,7 @@ export default function ComposeEmail() {
 							size="sm"
 							value={cc}
 							onChange={(e) => setCc(e.target.value)}
-							placeholder="Separate multiple addresses with commas"
+							placeholder="多个地址用逗号分隔"
 						/>
 					)}
 					{showCcBcc && (
@@ -88,13 +164,13 @@ export default function ComposeEmail() {
 							size="sm"
 							value={bcc}
 							onChange={(e) => setBcc(e.target.value)}
-							placeholder="Separate multiple addresses with commas"
+							placeholder="多个地址用逗号分隔"
 						/>
 					)}
 					<Input
-						label="Subject"
+						label="主题"
 						type="text"
-						placeholder="Email subject"
+						placeholder="邮件主题"
 						size="sm"
 						value={subject}
 						onChange={(e) => setSubject(e.target.value)}
@@ -102,9 +178,72 @@ export default function ComposeEmail() {
 					/>
 					<div>
 						<Text size="sm" DANGEROUS_className="font-medium mb-1.5 block">
-							Message
+							正文
 						</Text>
-						<RichTextEditor value={body} onChange={setBody} />
+						<RichTextEditor 
+							ref={editorRef}
+							value={body} 
+							onChange={setBody}
+							onImagePaste={(file) => handleAddAttachments([file])}
+						/>
+					</div>
+					<div>
+						<input
+							ref={fileInputRef}
+							type="file"
+							multiple
+							onChange={(e) => {
+								handleAddAttachments(e.target.files);
+								if (fileInputRef.current) fileInputRef.current.value = "";
+							}}
+							className="hidden"
+						/>
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							icon={<PaperclipIcon size={14} />}
+							onClick={() => fileInputRef.current?.click()}
+							disabled={isSending}
+						>
+							添加附件
+						</Button>
+						{attachments.length > 0 && (
+							<div className="mt-3 space-y-2">
+								<Text size="sm" DANGEROUS_className="font-medium">
+									附件 ({attachments.length})
+								</Text>
+								<div className="space-y-1">
+									{attachments.map((att) => (
+										<div
+											key={att.id}
+											className="flex items-center justify-between gap-2 rounded-md border border-kumo-line px-3 py-2 bg-kumo-fill/30"
+										>
+											<div className="flex items-center gap-2 flex-1 min-w-0">
+												<PaperclipIcon size={14} className="text-kumo-subtle shrink-0" />
+												<span className="text-sm text-kumo-default font-medium truncate">
+													{att.filename}
+													{att.disposition === "inline" && (
+														<span className="ml-1 text-xs text-kumo-subtle">(正文图片)</span>
+													)}
+												</span>
+												<span className="text-xs text-kumo-subtle shrink-0">
+													{formatBytes(att.size)}
+												</span>
+											</div>
+											<button
+												type="button"
+												onClick={() => handleRemoveAttachment(att.id)}
+												className="text-kumo-subtle hover:text-kumo-error transition-colors"
+												disabled={isSending}
+											>
+												<XIcon size={16} />
+											</button>
+										</div>
+									))}
+								</div>
+							</div>
+						)}
 					</div>
 					<div className="flex justify-between items-center pt-2">
 						<Button
@@ -114,7 +253,7 @@ export default function ComposeEmail() {
 							onClick={closeComposeModal}
 							disabled={isSending}
 						>
-							Discard
+							丢弃
 						</Button>
 						<div className="flex items-center gap-2">
 							<Button
@@ -126,7 +265,7 @@ export default function ComposeEmail() {
 								icon={<FloppyDiskIcon size={14} />}
 								onClick={handleSaveDraft}
 							>
-								{isSavingDraft ? "Saving..." : "Save as Draft"}
+								{isSavingDraft ? "保存中…" : "存草稿"}
 							</Button>
 							<Button
 								type="submit"
@@ -136,7 +275,7 @@ export default function ComposeEmail() {
 								disabled={isSavingDraft || isSending}
 								icon={<PaperPlaneTiltIcon size={14} />}
 							>
-								{isSending ? "Sending..." : "Send"}
+								{isSending ? "发送中…" : "发送"}
 							</Button>
 						</div>
 					</div>
