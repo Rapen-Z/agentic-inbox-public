@@ -816,6 +816,37 @@ export class MailboxDO extends DurableObject<Env> {
 		return null;
 	}
 
+	// ── Auto-reply daily counter (storage KV, UTC-day bucketed) ────
+
+	/**
+	 * Count auto-replies already sent today (UTC) for this mailbox.
+	 * Key shape: `autoReplyCount:<YYYY-MM-DD>` — old keys are pruned lazily.
+	 */
+	async getAutoReplyCountToday(): Promise<number> {
+		const today = new Date().toISOString().slice(0, 10);
+		// Prune stale day keys (keep today's) to keep storage tiny.
+		const all = await this.ctx.storage.list({ prefix: "autoReplyCount:" });
+		let count = 0;
+		const staleKeys: string[] = [];
+		for (const [key, value] of all) {
+			if (key === `autoReplyCount:${today}`) {
+				count = typeof value === "number" ? value : 0;
+			} else {
+				staleKeys.push(key);
+			}
+		}
+		if (staleKeys.length > 0) await this.ctx.storage.delete(staleKeys);
+		return count;
+	}
+
+	/** Increment today's auto-reply counter (UTC day bucket). */
+	async incrementAutoReplyCount(): Promise<void> {
+		const today = new Date().toISOString().slice(0, 10);
+		const key = `autoReplyCount:${today}`;
+		const current = await this.ctx.storage.get<number>(key);
+		await this.ctx.storage.put(key, (current ?? 0) + 1);
+	}
+
 	// ── Email creation (Drizzle) ───────────────────────────────────
 
 	async createEmail(

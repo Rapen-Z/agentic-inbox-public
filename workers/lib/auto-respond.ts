@@ -24,6 +24,8 @@ export interface AutoReplySettings {
 	enabled: boolean;
 	subject: string;
 	message: string;
+	/** Max auto-replies per mailbox per UTC day. 0 = unlimited. */
+	dailyLimit?: number;
 }
 
 export interface ForwardingSettings {
@@ -120,6 +122,22 @@ export async function handleAutoResponse(
 		// ── Auto-reply ──────────────────────────────────────────
 		const ar = settings?.autoReply;
 		if (ar?.enabled && ar.subject?.trim() && ar.message?.trim()) {
+			// Per-mailbox daily cap (0 or undefined = unlimited).
+			const limit = typeof ar.dailyLimit === "number" && ar.dailyLimit > 0
+				? Math.floor(ar.dailyLimit)
+				: 0;
+			if (limit > 0) {
+				const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+				const sentToday = await (stub as unknown as {
+					getAutoReplyCountToday: () => Promise<number>;
+				}).getAutoReplyCountToday();
+				if (sentToday >= limit) {
+					console.log(
+						`Auto-reply skipped for ${mailboxId}: daily limit ${limit} reached (${sentToday} sent today)`,
+					);
+					return;
+				}
+			}
 			const { messageId, outgoingMessageId } = generateMessageId(
 				mailboxId.split("@")[1] || "localhost",
 			);
@@ -140,6 +158,14 @@ export async function handleAutoResponse(
 				},
 			});
 			console.log(`Auto-reply sent from ${mailboxId} to ${sender}`);
+			if (limit > 0) {
+				try {
+					const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+					await (stub as unknown as { incrementAutoReplyCount: () => Promise<void> }).incrementAutoReplyCount();
+				} catch (e) {
+					console.error("Auto-reply counter increment failed:", (e as Error).message);
+				}
+			}
 
 			// Store in Sent so the UI shows the conversation state
 			try {
