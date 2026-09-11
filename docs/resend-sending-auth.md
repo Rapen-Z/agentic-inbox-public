@@ -32,9 +32,9 @@ Verified smoke results: unauth `/` → 401 login HTML ✓; correct login POST �
 
 ## Deploy/ops facts
 
-- Wrangler unauthenticated by default → `set -a && source /root/projects/footballanalysis/.env` (has `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`, account `34cac18d…`).
+- Wrangler unauthenticated by default → export `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` (or `npx wrangler login`) before any deploy/secret command.
 - Secrets: `RESEND_API_KEY` from `/root/projects/agentic-inbox-src/.env.resend`; `ADMIN_TOKEN` stored at `/root/projects/agentic-inbox-src/.admin_token` (48-hex, generated `openssl rand -hex 24`).
 - Resend sends from sandbox: `execute_code`/python urllib → 403 error 1010 (CF TLS fingerprint block); **curl in terminal works**. Resend log check: `GET /emails/<id>` → `last_event`.
 - CF API token can READ Access apps/IdPs but writes return `auth.forbidden` — Access setup is dashboard-only.
 - Deployed versions: sending `14827828-…`, auth `9e6e47d` → `9fabeaee-…`.
-- Pending when Access is adopted: dashboard create Access app on `agentic-inbox.1356864775.workers.dev`, get AUD tag + team domain → `wrangler secret put POLICY_AUD`/`TEAM_DOMAIN`. Mode order in code: **ADMIN_TOKEN wins if set** (checked first) — so `wrangler secret delete ADMIN_TOKEN` is required to actually switch to Access mode after setting the Access secrets.
+- Pending when Access is adopted: dashboard create Access app on `agentic-inbox.<your-subdomain>.workers.dev`, get AUD tag + team domain → `wrangler secret put POLICY_AUD`/`TEAM_DOMAIN`. Mode order in code: **ADMIN_TOKEN wins if set** (checked first) — so `wrangler secret delete ADMIN_TOKEN` is required to actually switch to Access mode after setting the Access secrets.
