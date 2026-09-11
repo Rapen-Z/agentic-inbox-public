@@ -113,30 +113,104 @@ async function sendViaCF(
 }
 
 /**
- * Send via Resend when RESEND_API_KEY is configured (and the from-domain is
- * verified there — assume yes, per mailbox config), else fall back to the
- * Cloudflare send_email binding (requires Workers Paid).
+ * Multi-account Resend support: RESEND_API_KEYS (comma-separated) allows
+ * several Resend accounts, each with its own verified domains (Resend free
+ * tier allows only 3 domains per account). The key whose account has the
+ * sending domain verified is chosen per send; key selection state is kept
+ * in module scope per isolate (last-known-good wins, failures rotate).
+ *
+ * Resolution order per send:
+ *   1. env.RESEND_DOMAIN_KEY_MAP (JSON: {"domain.com": "re_xxx", ...}) —
+ *      explicit per-domain key assignment, highest priority
+ *   2. last key that successfully sent for this from-domain (isolate cache)
+ *   3. keys in order: first success wins (Resend rejects unverified domains
+ *      with 403/422, which advances the rotation)
+ * Falls back to CF send_email binding if all keys fail.
  */
+
+/** Isolate-level cache: from-domain → last successful API key. */
+const domainKeyCache = new Map<string, string>();
+
+function parseKeys(env: { RESEND_API_KEY?: string; RESEND_API_KEYS?: string }): string[] {
+	const multi = (env.RESEND_API_KEYS || "")
+		.split(",")
+		.map((k) => k.trim())
+		.filter(Boolean);
+	if (multi.length > 0) return multi;
+	return env.RESEND_API_KEY ? [env.RESEND_API_KEY] : [];
+}
+
+function parseDomainKeyMap(raw: string | undefined): Record<string, string> {
+	if (!raw) return {};
+	try {
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		const out: Record<string, string> = {};
+		for (const [domain, key] of Object.entries(parsed)) {
+			if (typeof key === "string" && key.startsWith("re_")) {
+				out[domain.trim().toLowerCase()] = key;
+			}
+		}
+		return out;
+	} catch {
+		console.warn("RESEND_DOMAIN_KEY_MAP is not valid JSON — ignoring");
+		return {};
+	}
+}
+
+/** Pick the candidate keys for a from-domain, best first. */
+function candidateKeys(
+	env: { RESEND_API_KEY?: string; RESEND_API_KEYS?: string; RESEND_DOMAIN_KEY_MAP?: string },
+	fromDomain: string,
+): string[] {
+	const all = parseKeys(env);
+	if (all.length === 0) return [];
+	const map = parseDomainKeyMap(env.RESEND_DOMAIN_KEY_MAP);
+	const pinned = map[fromDomain];
+
+	const ordered: string[] = [];
+	if (pinned && all.includes(pinned)) ordered.push(pinned);
+	const cached = domainKeyCache.get(fromDomain);
+	if (cached && all.includes(cached) && !ordered.includes(cached)) ordered.push(cached);
+	for (const k of all) if (!ordered.includes(k)) ordered.push(k);
+	return ordered;
+}
 export async function sendUnified(
-	env: { EMAIL?: SendEmail; RESEND_API_KEY?: string },
+	env: {
+		EMAIL?: SendEmail;
+		RESEND_API_KEY?: string;
+		RESEND_API_KEYS?: string;
+		RESEND_DOMAIN_KEY_MAP?: string;
+	},
 	params: UnifiedSendParams,
 ): Promise<{ messageId: string; provider: "resend" | "cf" }> {
 	const fromEmail = typeof params.from === "string" ? params.from : params.from.email;
+	const fromDomain = fromEmail.split("@")[1]?.toLowerCase() || "";
 
-	if (env.RESEND_API_KEY) {
-		try {
-			return await sendViaResend(env.RESEND_API_KEY, params);
-		} catch (e) {
-			// If Resend rejects (unverified domain etc.) and we have a CF binding, fall back
-			if (env.EMAIL) {
-				console.warn("Resend send failed, falling back to CF binding:", (e as Error).message);
-				return sendViaCF(env.EMAIL, params);
+	const keys = candidateKeys(env, fromDomain);
+	if (keys.length > 0) {
+		const errors: string[] = [];
+		for (const key of keys) {
+			try {
+				const result = await sendViaResend(key, params);
+				// Remember the working key for this domain (per-isolate).
+				if (fromDomain) domainKeyCache.set(fromDomain, key);
+				return result;
+			} catch (e) {
+				errors.push((e as Error).message);
 			}
-			throw e;
 		}
+		// All Resend keys failed — fall back to CF binding if available.
+		if (env.EMAIL) {
+			console.warn(
+				`All ${keys.length} Resend key(s) failed for ${fromEmail}, falling back to CF binding:`,
+				errors.join(" | "),
+			);
+			return sendViaCF(env.EMAIL, params);
+		}
+		throw new Error(`All ${keys.length} Resend key(s) failed: ${errors.join(" | ")}`);
 	}
 	if (env.EMAIL) {
 		return sendViaCF(env.EMAIL, params);
 	}
-	throw new Error("No email provider configured (RESEND_API_KEY or EMAIL binding)");
+	throw new Error("No email provider configured (RESEND_API_KEYS or EMAIL binding)");
 }
