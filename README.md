@@ -10,6 +10,22 @@ An **AI-powered Email Agent** can read your inbox, search conversations, and dra
 ![Agentic Inbox screenshot](./demo_app.png)
 
 
+## 📚 Full setup playbook (docs/)
+
+**[`docs/SKILL.md`](docs/SKILL.md)** is a complete from-zero operations manual covering everything the quick-start below leaves out: Resend domain verification (required for outbound), auto-reply daily limits, acceptance tests per domain, Gmail "send-as" aliases, and every pitfall we hit in production (deliverability cold start, preview-alias traps, review-copy recipe, etc.).
+
+Supplementary references in [`docs/`](docs/):
+- [`auto-respond-patch.md`](docs/auto-respond-patch.md) — how the auto-reply/forwarding engine is wired (upstream ships these settings as dead placeholders; this fork makes them real)
+- [`resend-sending-auth.md`](docs/resend-sending-auth.md) — sending & auth internals
+- [`security00-upgrade-merge.md`](docs/security00-upgrade-merge.md) — send-stack comparison (CF `send_email` binding vs Resend) + step-by-step review-copy recipe
+
+## What this fork changes vs upstream
+
+- **Real auto-reply & forwarding** — per-mailbox toggle, subject/message, target address, with loop protection (never replies to bounces, no-reply senders, auto-submitted mail, mailing lists)
+- **Auto-reply daily limit** — per-mailbox cap per UTC day (`0` = unlimited), counter in Durable Object storage
+- **`sendUnified` sending** — Resend API primary (free tier: 3,000 emails/mo) with CF `send_email` binding fallback (needs Workers Paid for arbitrary recipients)
+- **Dual-mode auth** — Cloudflare Access JWT (recommended) or `ADMIN_TOKEN` password login
+
 Read the blog post to learn more about Cloudflare Email Service and how to use it with the Agents SDK, MCP, and from the Wrangler CLI: [Email for Agents](https://blog.cloudflare.com/email-for-agents/).
 
 ## How to setup
